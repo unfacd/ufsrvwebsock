@@ -1,0 +1,673 @@
+/**
+ * Copyright (C) 2015-2026 unfacd works
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU Affero General Public License for more details.
+ *
+ * You should have received a copy of the GNU Affero General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#ifdef HAVE_CONFIG_UFSRVWEBSOCK_H
+# include <config_ufsrvwebsock.h>
+#endif
+
+#include "main.h"
+#include "nportredird.h"
+#include "protocol_websocket.h"
+#include "ufsrvcmd_user_callbacks.h"
+
+#include <utils_time.h>
+
+#include "ufnet_core/transmission_message_type.h"
+#include "ufnet_core/user_prefs/user_prefs.h"
+
+/**
+ * @brief These are client-bound command invocations which can happen either as responses, or server-initiated requests through
+ * the dedicated Websocket connection.
+ * WEB_SOCKET_MESSAGE__TYPE__REQUEST and WEB_SOCKET_MESSAGE__TYPE__RESPONSE type reflect the semantic ordering of messaging. Initiator
+ * always sends WEB_SOCKET_MESSAGE__TYPE__REQUEST.
+ */
+
+/* every callback that packs a body arms the same releaser; the attribute runs it on any exit */
+#define _WEBSOCKET_MESSAGE_CLEANUP __attribute__((cleanup(sCleanupWebSocketMessageBody)))
+
+/**
+ * @brief Release the protobuf body attached to a WebSocketMessage when its scope ends.
+ *
+ * The body buffer is allocated by the callback that fills it in and is never owned by the socket
+ * write path, so it has to be returned regardless of how the callback exits. Every callback that can
+ * pack a body arms it through @ref _WEBSOCKET_MESSAGE_CLEANUP.
+ *
+ * @param wsmsg_ptr Address of the message whose selected arm may own a body.
+ */
+static void
+sCleanupWebSocketMessageBody(WebSocketMessage *wsmsg_ptr)
+{
+  if ((wsmsg_ptr->type == WEB_SOCKET_MESSAGE__TYPE__REQUEST) && IS_PRESENT(wsmsg_ptr->request)
+      && wsmsg_ptr->request->has_body) {
+    free(wsmsg_ptr->request->body.data);
+  } else
+  if ((wsmsg_ptr->type == WEB_SOCKET_MESSAGE__TYPE__RESPONSE) && IS_PRESENT(wsmsg_ptr->response)
+      && wsmsg_ptr->response->has_body) {
+    free(wsmsg_ptr->response->body.data);
+  }
+}
+
+#define _COMMAND_RESPONSE(x, y, z) \
+	/*we are responding to a request*/\
+	if (wsm_ptr_received->type == WEB_SOCKET_MESSAGE__TYPE__REQUEST) {\
+		TransmissionMessage tmsg = {0};\
+		WebSocketMessage wsmsg = WEB_SOCKET_MESSAGE__INIT;\
+		WebSocketResponseMessage wsmsg_r = WEB_SOCKET_RESPONSE_MESSAGE__INIT;\
+		\
+		wsmsg.response = &wsmsg_r;\
+		wsmsg.type = WEB_SOCKET_MESSAGE__TYPE__RESPONSE;\
+		wsmsg.has_type = 1;\
+		wsmsg.command = x;\
+		wsmsg_r.id = wsm_ptr_received->request->id;\
+		wsmsg_r.status = y; wsmsg_r.has_status = 1;\
+		if (z) {\
+			wsmsg_r.message = z;\
+		}\
+		\
+		tmsg.msg = (void *)&wsmsg;\
+		tmsg.type = TRANSMSG_PROTOBUF;\
+		\
+		if (UfsrvCommandMarshalTransmission (ctx_ptr, NULL, &tmsg, 0) >= 0) {\
+			_RETURN_RESULT_SESN(AS_SESSION(ctx_ptr->sesn_ptr), NULL, RESULT_TYPE_SUCCESS, RESCODE_PROG_NULL_POINTER)\
+		}\
+	}
+
+#define _COMMAND_REQUEST(x, y, z) \
+	/*we are responding to a request*/\
+	{\
+		TransmissionMessage tmsg = {0};\
+		WebSocketMessage wsmsg   = WEB_SOCKET_MESSAGE__INIT;\
+		WebSocketRequestMessage wsmsg_r = WEB_SOCKET_REQUEST_MESSAGE__INIT;\
+		\
+		wsmsg.request = &wsmsg_r;\
+		wsmsg.type    = WEB_SOCKET_MESSAGE__TYPE__REQUEST;\
+		wsmsg.has_type= 1;\
+		wsmsg.command = x;\
+		wsmsg_r.id    = time(NULL);\
+		if (z) {\
+			wsmsg_r.path = z;\
+		}\
+		\
+		tmsg.msg  = (void *)&wsmsg;\
+		tmsg.type = TRANSMSG_PROTOBUF;\
+		\
+		if (UfsrvCommandMarshalTransmission (ctx_ptr, NULL, &tmsg, 0) >= 0) {\
+			_RETURN_RESULT_SESN(AS_SESSION(ctx_ptr->sesn_ptr), NULL, RESULT_TYPE_SUCCESS, RESCODE_PROG_NULL_POINTER)\
+		}\
+	}
+
+//0
+UFSRV_USER_COMMAND(uOK_V1)
+{
+	if (wsm_ptr_received->type == WEB_SOCKET_MESSAGE__TYPE__REQUEST) {
+		TransmissionMessage		tmsg				={0};
+		WebSocketMessage			wsmsg				= WEB_SOCKET_MESSAGE__INIT;
+		WebSocketResponseMessage	wsmsg_r	= WEB_SOCKET_RESPONSE_MESSAGE__INIT;
+
+		wsmsg_r.id = wsm_ptr_received->request->id; wsmsg_r.has_id = 1;
+		wsmsg_r.status = 200; wsmsg_r.has_status = 1;
+		wsmsg.response = &wsmsg_r;
+
+		wsmsg.command = wsm_ptr_received->command; //AA note: reuses the previous command to respond
+		wsmsg.type = WEB_SOCKET_MESSAGE__TYPE__RESPONSE; wsmsg.has_type = 1;
+
+		tmsg.msg = (void *)&wsmsg;
+		tmsg.type = TRANSMSG_PROTOBUF;
+
+		return UfsrvCommandMarshalTransmissionStaged(ctx_ptr, &tmsg, 0);
+	}
+
+	_RETURN_RESULT_SESN(AS_SESSION(ctx_ptr->sesn_ptr), NULL, RESULT_TYPE_ERR, RESCODE_PROG_NULL_POINTER)
+
+}
+
+//1 REUSED FOR CONNECTION REJECTION AND SESSION INVALIDATION
+UFSRV_USER_COMMAND(uACCOUNT_VERIFIED_V1)
+{
+	syslog (LOG_DEBUG, "%s: CALLBACK: ...", __func__);
+
+  if (IS_PRESENT(JsonFormatStateSyncForSessionState(AS_SESSION(ctx_ptr->sesn_ptr), INVALID_COOKIE, jobj))) {
+    char *json_str = (char *)json_object_to_json_string(jobj);
+
+    //client can request this anytime to sync its own state
+    if (wsm_ptr_received && wsm_ptr_received->type == WEB_SOCKET_MESSAGE__TYPE__REQUEST) {
+//      _COMMAND_RESPONSE("/v1/StateSync", 200, json_str)
+    } else {//could be null wsm, we build our own
+      _COMMAND_REQUEST("/v1/StateSync", 0, json_str)
+    }
+  }
+  _RETURN_RESULT_SESN(AS_SESSION(ctx_ptr->sesn_ptr), NULL, RESULT_TYPE_ERR, RESCODE_PROG_NULL_POINTER);
+
+}
+
+//TODO: TEMPORARILY USED FOR RECEIPT COMMAND
+UFSRV_USER_COMMAND(uSETACCOUNT_ATTRS_V1)
+{
+	UfsrvCommandMarshallingDescriptor	*ufsrv_descpription_ptr	= msgload;
+	TransmissionMessage				tmsg          = {0};
+	WebSocketMessage__Type		type;
+	_WEBSOCKET_MESSAGE_CLEANUP WebSocketMessage wsmsg = WEB_SOCKET_MESSAGE__INIT;
+  WebSocketResponseMessage  wsmsg_r, *wsmsg_r_ptr = &wsmsg_r;
+  WebSocketRequestMessage   wsmsg_rq, *wsmsg_rq_ptr = &wsmsg_rq;
+
+	wsmsg.command = "ufsrv://v1/Receipt";
+
+	tmsg.msg = (void *)&wsmsg;
+	tmsg.type = TRANSMSG_PROTOBUF;
+	tmsg.eid = ufsrv_descpription_ptr->eid;
+  tmsg.gid = ufsrv_descpription_ptr->gid;
+	tmsg.fid = ufsrv_descpription_ptr->fid;
+	tmsg.timestamp = ufsrv_descpription_ptr->timestamp;
+
+	if (wsm_ptr_received)	type = wsm_ptr_received->type;
+	else					type = WEB_SOCKET_MESSAGE__TYPE__RESPONSE;
+
+	if (type == WEB_SOCKET_MESSAGE__TYPE__RESPONSE) {
+    web_socket_response_message__init(wsmsg_r_ptr);
+
+		wsmsg.response = &wsmsg_r;
+		wsmsg.type = WEB_SOCKET_MESSAGE__TYPE__RESPONSE; wsmsg.has_type=1;
+
+		if (msgload) {
+			wsmsg_r.body.len = (*ufsrv_descpription_ptr->metadata->sizer)(ufsrv_descpription_ptr->payload);
+			wsmsg_r.body.data = calloc(1, wsmsg_r.body.len);
+			ufsrv_descpription_ptr->metadata->packer(ufsrv_descpription_ptr->payload, wsmsg_r.body.data);
+			wsmsg_r.has_body = 1;
+		}
+	} else if (type == WEB_SOCKET_MESSAGE__TYPE__REQUEST) {
+    web_socket_request_message__init(wsmsg_rq_ptr);
+
+		wsmsg.request = &wsmsg_rq;
+		wsmsg.type = WEB_SOCKET_MESSAGE__TYPE__REQUEST; wsmsg.has_type=1;
+
+		if (msgload) {
+			wsmsg_rq.body.len = (*ufsrv_descpription_ptr->metadata->sizer)(ufsrv_descpription_ptr->payload);
+			wsmsg_rq.body.data = calloc(1, wsmsg_rq.body.len);
+			ufsrv_descpription_ptr->metadata->packer(ufsrv_descpription_ptr->payload, wsmsg_rq.body.data);
+			wsmsg_rq.has_body = 1;
+		}
+	} else {
+		_RETURN_RESULT_SESN(AS_SESSION(ctx_ptr->sesn_ptr), NULL, RESULT_TYPE_ERR, RESCODE_PROG_NULL_POINTER)
+	}
+
+	InstanceContextForSession *delivery_ctx_ptr = IS_PRESENT(ctx_ptr_target) ? ctx_ptr_target : ctx_ptr;
+
+	return UfsrvCommandMarshalTransmissionStaged(delivery_ctx_ptr, &tmsg, 0);
+
+}
+
+UFSRV_USER_COMMAND(uSYNC_V1)
+{
+  UfsrvCommandMarshallingDescriptor	*ufsrv_description_ptr	= (UfsrvCommandMarshallingDescriptor *)msgload;
+  TransmissionMessage				tmsg				= {0};
+  WebSocketMessage__Type		type;
+  _WEBSOCKET_MESSAGE_CLEANUP WebSocketMessage wsmsg = WEB_SOCKET_MESSAGE__INIT;
+  WebSocketResponseMessage  wsmsg_r, *wsmsg_r_ptr = &wsmsg_r;
+  WebSocketRequestMessage   wsmsg_rq, *wsmsg_rq_ptr = &wsmsg_rq;
+
+  wsmsg.command = "ufsrv://v1/Sync";
+
+  tmsg.msg = (void *)&wsmsg;
+  tmsg.type = TRANSMSG_PROTOBUF;
+  tmsg.eid = ufsrv_description_ptr->eid;
+  tmsg.fid = ufsrv_description_ptr->fid;
+  tmsg.timestamp = ufsrv_description_ptr->timestamp;
+
+  if (wsm_ptr_received)	type = wsm_ptr_received->type;
+  else	type = WEB_SOCKET_MESSAGE__TYPE__RESPONSE;
+
+  if (type == WEB_SOCKET_MESSAGE__TYPE__RESPONSE) {
+    web_socket_response_message__init(wsmsg_r_ptr);
+
+    wsmsg.response = &wsmsg_r;
+    wsmsg.type = WEB_SOCKET_MESSAGE__TYPE__RESPONSE; wsmsg.has_type = 1;
+
+    if (msgload) {
+      wsmsg_r.body.len = (*ufsrv_description_ptr->metadata->sizer)(ufsrv_description_ptr->payload);
+      wsmsg_r.body.data = calloc(1, wsmsg_r.body.len);
+      ufsrv_description_ptr->metadata->packer(ufsrv_description_ptr->payload, wsmsg_r.body.data);
+      wsmsg_r.has_body = 1;
+    }
+  } else if (type == WEB_SOCKET_MESSAGE__TYPE__REQUEST) {
+    web_socket_request_message__init(wsmsg_rq_ptr);
+
+    wsmsg.request = &wsmsg_rq;
+    wsmsg.type = WEB_SOCKET_MESSAGE__TYPE__REQUEST; wsmsg.has_type = 1;
+
+    if (msgload) {
+      wsmsg_rq.body.len = (*ufsrv_description_ptr->metadata->sizer)(ufsrv_description_ptr->payload);
+      wsmsg_rq.body.data = calloc(1, wsmsg_rq.body.len);
+      ufsrv_description_ptr->metadata->packer(ufsrv_description_ptr->payload, wsmsg_rq.body.data);
+      wsmsg_rq.has_body = 1;
+    }
+  } else {
+    _RETURN_RESULT_SESN(AS_SESSION(ctx_ptr->sesn_ptr), NULL, RESULT_TYPE_ERR, RESCODE_PROG_NULL_POINTER)
+  }
+
+    if (!IS_PRESENT(ctx_ptr_target) || !IS_PRESENT(ctx_ptr_target->sesn_ptr)) {
+    _RETURN_RESULT_SESN(AS_SESSION(ctx_ptr->sesn_ptr), NULL, RESULT_TYPE_ERR, RESCODE_PROG_NULL_POINTER)
+  }
+
+  return UfsrvCommandMarshalTransmissionStaged(ctx_ptr_target, &tmsg, 0);
+}
+
+UFSRV_USER_COMMAND(uSTATE_V1)
+{
+  UfsrvCommandMarshallingDescriptor	*ufsrv_description_ptr	= (UfsrvCommandMarshallingDescriptor *)msgload;
+  TransmissionMessage					tmsg					= {0};
+  WebSocketMessage__Type			type;
+  _WEBSOCKET_MESSAGE_CLEANUP WebSocketMessage wsmsg = WEB_SOCKET_MESSAGE__INIT;
+  WebSocketRequestMessage     wsmsg_rq, *wsmsg_rq_ptr = &wsmsg_rq;
+
+  wsmsg.command = "ufsrv://v1/ActivityState";
+
+  tmsg.msg = (void *)&wsmsg;
+  tmsg.type = TRANSMSG_PROTOBUF;
+  tmsg.eid = ufsrv_description_ptr->eid;
+  tmsg.fid = ufsrv_description_ptr->fid;
+  tmsg.timestamp = ufsrv_description_ptr->timestamp;
+
+  if (wsm_ptr_received)	type = wsm_ptr_received->type;
+  else	type = WEB_SOCKET_MESSAGE__TYPE__RESPONSE;
+
+  if (type == WEB_SOCKET_MESSAGE__TYPE__REQUEST) {
+    web_socket_request_message__init(wsmsg_rq_ptr);
+
+    wsmsg.request = &wsmsg_rq;
+    wsmsg.type = WEB_SOCKET_MESSAGE__TYPE__REQUEST; wsmsg.has_type = 1;
+
+    if (msgload) {
+      wsmsg_rq.body.len = (*ufsrv_description_ptr->metadata->sizer)(ufsrv_description_ptr->payload);
+      wsmsg_rq.body.data = calloc(1, wsmsg_rq.body.len);
+      ufsrv_description_ptr->metadata->packer(ufsrv_description_ptr->payload, wsmsg_rq.body.data);
+      wsmsg_rq.has_body = 1;
+    }
+  } else if (type == WEB_SOCKET_MESSAGE__TYPE__RESPONSE) {
+    /* state commands are of relay-to-user semantics so this is not applicable */
+    _RETURN_RESULT_SESN(AS_SESSION(ctx_ptr->sesn_ptr), NULL, RESULT_TYPE_ERR, RESCODE_PROG_NULL_POINTER)
+  } else {
+    _RETURN_RESULT_SESN(AS_SESSION(ctx_ptr->sesn_ptr), NULL, RESULT_TYPE_ERR, RESCODE_PROG_NULL_POINTER)
+  }
+
+  /* state is always relayed to a peer session: falling back to the originator would echo it back */
+  if (!IS_PRESENT(ctx_ptr_target) || !IS_PRESENT(ctx_ptr_target->sesn_ptr)) {
+    _RETURN_RESULT_SESN(AS_SESSION(ctx_ptr->sesn_ptr), NULL, RESULT_TYPE_ERR, RESCODE_PROG_NULL_POINTER)
+  }
+
+  return UfsrvCommandMarshalTransmissionStaged(ctx_ptr_target, &tmsg, 0);
+
+}
+
+//TODO: TEMPORARILY USED FOR CALL COMMAND
+UFSRV_USER_COMMAND(uSETKEYS_V1)
+{
+	UfsrvCommandMarshallingDescriptor	*ufsrv_description_ptr	= (UfsrvCommandMarshallingDescriptor *)msgload;
+	TransmissionMessage					tmsg					= {0};
+	WebSocketMessage__Type			type;
+	_WEBSOCKET_MESSAGE_CLEANUP WebSocketMessage wsmsg = WEB_SOCKET_MESSAGE__INIT;
+  WebSocketRequestMessage     wsmsg_rq, *wsmsg_rq_ptr = &wsmsg_rq;
+
+	wsmsg.command="ufsrv://v1/Call";
+
+	tmsg.msg = (void *)&wsmsg;
+	tmsg.type = TRANSMSG_PROTOBUF;
+	tmsg.eid = ufsrv_description_ptr->eid;
+  tmsg.gid = ufsrv_description_ptr->gid;
+	tmsg.fid = ufsrv_description_ptr->fid;
+	tmsg.timestamp = ufsrv_description_ptr->timestamp;
+
+	if (wsm_ptr_received)	type = wsm_ptr_received->type;
+	else	type = WEB_SOCKET_MESSAGE__TYPE__RESPONSE;
+
+	if (type == WEB_SOCKET_MESSAGE__TYPE__REQUEST) {
+    web_socket_request_message__init(wsmsg_rq_ptr);
+
+		wsmsg.request = &wsmsg_rq;
+		wsmsg.type = WEB_SOCKET_MESSAGE__TYPE__REQUEST; wsmsg.has_type = 1;
+
+		if (msgload) {
+			wsmsg_rq.body.len = (*ufsrv_description_ptr->metadata->sizer)(ufsrv_description_ptr->payload);
+			wsmsg_rq.body.data = calloc(1, wsmsg_rq.body.len);
+      ufsrv_description_ptr->metadata->packer(ufsrv_description_ptr->payload, wsmsg_rq.body.data);
+			wsmsg_rq.has_body = 1;
+		}
+	} else if (type == WEB_SOCKET_MESSAGE__TYPE__RESPONSE) {
+	  goto return_error;
+	  //call commands are of relay-to-user semantics so this is not applicable
+//    WebSocketResponseMessage wsmsg_r = WEB_SOCKET_RESPONSE_MESSAGE__INIT;
+//
+//    wsmsg.response = &wsmsg_r;
+//    wsmsg.type = WEB_SOCKET_MESSAGE__TYPE__RESPONSE; wsmsg.has_type = 1;
+//
+//    if (msgload) {
+//      wsmsg_r.body.len = (*ufsrv_descpription_ptr->metadata->sizer)(ufsrv_descpription_ptr->payload);
+//      wsmsg_r.body.data = calloc(1, wsmsg_r.body.len);
+//      ufsrv_descpription_ptr->metadata->packer(ufsrv_descpription_ptr->payload, wsmsg_r.body.data);
+//      wsmsg_r.has_body = 1;
+//    }
+  } else {
+		_RETURN_RESULT_SESN(AS_SESSION(ctx_ptr->sesn_ptr), NULL, RESULT_TYPE_ERR, RESCODE_PROG_NULL_POINTER)
+	}
+
+	if ((UfsrvCommandMarshalTransmission(ctx_ptr, ctx_ptr_target, &tmsg, 0)) >= 0) {
+		_RETURN_RESULT_SESN(AS_SESSION(ctx_ptr->sesn_ptr), NULL, RESULT_TYPE_SUCCESS, RESCODE_PROG_NULL_POINTER)
+	}
+
+  return_error:
+	_RETURN_RESULT_SESN(AS_SESSION(ctx_ptr->sesn_ptr), NULL, RESULT_TYPE_ERR, RESCODE_PROG_NULL_POINTER)
+
+}
+
+//TODO: Temporarily used for USER COMMAND
+UFSRV_USER_COMMAND(uGETKEYS_V1)
+{
+	UfsrvCommandMarshallingDescriptor		*ufsrv_descpription_ptr	= (UfsrvCommandMarshallingDescriptor *)msgload;
+	TransmissionMessage										tmsg 										= {0};
+	WebSocketMessage__Type								type;
+	_WEBSOCKET_MESSAGE_CLEANUP WebSocketMessage wsmsg = WEB_SOCKET_MESSAGE__INIT;
+  WebSocketResponseMessage              wsmsg_r, *wsmsg_r_ptr = &wsmsg_r;
+  WebSocketRequestMessage               wsmsg_rq, *wsmsg_rq_ptr = &wsmsg_rq;
+
+
+	wsmsg.command="ufsrv://v1/User";
+
+	tmsg.msg = (void *)&wsmsg;
+	tmsg.type = TRANSMSG_PROTOBUF;
+	tmsg.eid = ufsrv_descpription_ptr->eid;
+  tmsg.gid = ufsrv_descpription_ptr->gid;
+	tmsg.timestamp = ufsrv_descpription_ptr->timestamp;
+
+	if (wsm_ptr_received)	type = wsm_ptr_received->type;
+	else	type = WEB_SOCKET_MESSAGE__TYPE__RESPONSE;
+
+	if (type == WEB_SOCKET_MESSAGE__TYPE__RESPONSE) {
+    web_socket_response_message__init(wsmsg_r_ptr);
+
+		wsmsg.response = &wsmsg_r;
+		wsmsg.type = WEB_SOCKET_MESSAGE__TYPE__RESPONSE; wsmsg.has_type=1;
+
+		if (msgload) {
+			wsmsg_r.body.len = (*ufsrv_descpription_ptr->metadata->sizer)(ufsrv_descpription_ptr->payload);
+			wsmsg_r.body.data = calloc(1, wsmsg_r.body.len);
+			ufsrv_descpription_ptr->metadata->packer(ufsrv_descpription_ptr->payload, wsmsg_r.body.data);
+			wsmsg_r.has_body = 1;
+		}
+	} else if (type == WEB_SOCKET_MESSAGE__TYPE__REQUEST) {
+    web_socket_request_message__init(wsmsg_rq_ptr);
+
+		wsmsg.request = &wsmsg_rq;
+		wsmsg.type = WEB_SOCKET_MESSAGE__TYPE__REQUEST; wsmsg.has_type = 1;
+
+		if (msgload) {
+			wsmsg_rq.body.len = (*ufsrv_descpription_ptr->metadata->sizer)(ufsrv_descpription_ptr->payload);
+			wsmsg_rq.body.data = calloc(1, wsmsg_rq.body.len);
+			ufsrv_descpription_ptr->metadata->packer(ufsrv_descpription_ptr->payload, wsmsg_rq.body.data);
+			wsmsg_rq.has_body = 1;
+		}
+	} else {
+		syslog (LOG_ERR, "%s {pid:'%lu', o:'%p', cid:'%lu', wsm_type:'%d'} ERROR: UNKNOWN WSM MESSAGE TYPE...", __func__, pthread_self(), ctx_ptr->sesn_ptr, SESSION_ID(AS_SESSION(ctx_ptr->sesn_ptr)), type);
+		_RETURN_RESULT_SESN(AS_SESSION(ctx_ptr->sesn_ptr), NULL, RESULT_TYPE_ERR, RESCODE_PROG_NULL_POINTER)
+	}
+
+	if ((UfsrvCommandMarshalTransmission(ctx_ptr, ctx_ptr_target, &tmsg, 0)) >= 0) {
+		_RETURN_RESULT_SESN(AS_SESSION(ctx_ptr->sesn_ptr), NULL, RESULT_TYPE_SUCCESS, RESCODE_PROG_NULL_POINTER)
+	}
+
+	_RETURN_RESULT_SESN(AS_SESSION(ctx_ptr->sesn_ptr), NULL, RESULT_TYPE_ERR, RESCODE_PROG_NULL_POINTER)
+
+}
+
+//TODO
+//PORTING NOTE: following callbacks will fail: they still depend on old pipelined transmission (uSETKEYS, uGETKEYS, uLOCATION, uSTATESYNC)
+UFSRV_USER_COMMAND(uMSG_V1)
+{
+	UfsrvCommandMarshallingDescriptor	*ufsrv_descpription_ptr	= (UfsrvCommandMarshallingDescriptor *)msgload;
+	TransmissionMessage				tmsg				= {0};
+	WebSocketMessage__Type		type;
+	_WEBSOCKET_MESSAGE_CLEANUP WebSocketMessage wsmsg = WEB_SOCKET_MESSAGE__INIT;
+  WebSocketResponseMessage  wsmsg_r, *wsmsg_r_ptr = &wsmsg_r;
+  WebSocketRequestMessage   wsmsg_rq, *wsmsg_rq_ptr = &wsmsg_rq;
+
+  char header_timestamp[sizeof(HTTP_HEADER_TIMESTAMP) + UINT64_LONGEST_STR_SZ + 1] = {0};
+  snprintf(header_timestamp, sizeof(header_timestamp), "%s:%lld", HTTP_HEADER_TIMESTAMP, GetTimeNowInMillis());
+  char *headers[1]; headers[0] = header_timestamp;
+
+	wsmsg.command = "ufsrv://v1/Message";
+  wsmsg.headers = headers; wsmsg.n_headers = 1;
+
+	tmsg.msg = (void *)&wsmsg;
+	tmsg.type = TRANSMSG_PROTOBUF;
+	tmsg.eid = ufsrv_descpription_ptr->eid;
+  tmsg.gid = ufsrv_descpription_ptr->gid;
+	tmsg.fid = ufsrv_descpription_ptr->fid;
+	tmsg.timestamp = ufsrv_descpription_ptr->timestamp;
+
+	if (wsm_ptr_received)	type = wsm_ptr_received->type;
+	else	type = WEB_SOCKET_MESSAGE__TYPE__RESPONSE;
+
+	if (type == WEB_SOCKET_MESSAGE__TYPE__RESPONSE) {
+    web_socket_response_message__init(wsmsg_r_ptr);
+
+		wsmsg.response = &wsmsg_r;
+		wsmsg.type = WEB_SOCKET_MESSAGE__TYPE__RESPONSE; wsmsg.has_type = 1;
+
+		if (msgload) {
+			wsmsg_r.body.len = (*ufsrv_descpription_ptr->metadata->sizer)(ufsrv_descpription_ptr->payload);
+			wsmsg_r.body.data = calloc(1, wsmsg_r.body.len);
+			ufsrv_descpription_ptr->metadata->packer(ufsrv_descpription_ptr->payload, wsmsg_r.body.data);
+			wsmsg_r.has_body = 1;
+		}
+	} else if (type == WEB_SOCKET_MESSAGE__TYPE__REQUEST) {
+    web_socket_request_message__init(wsmsg_rq_ptr);
+
+		wsmsg.request = &wsmsg_rq;
+		wsmsg.type = WEB_SOCKET_MESSAGE__TYPE__REQUEST; wsmsg.has_type = 1;
+
+		if (msgload) {
+			wsmsg_rq.body.len = (*ufsrv_descpription_ptr->metadata->sizer)(ufsrv_descpription_ptr->payload);
+			wsmsg_rq.body.data = calloc(1, wsmsg_rq.body.len);
+			ufsrv_descpription_ptr->metadata->packer(ufsrv_descpription_ptr->payload, wsmsg_rq.body.data);
+			wsmsg_rq.has_body = 1;
+		}
+	} else {
+		_RETURN_RESULT_SESN(AS_SESSION(ctx_ptr->sesn_ptr), NULL, RESULT_TYPE_ERR, RESCODE_PROG_NULL_POINTER)
+	}
+
+	/* the reply to the originator is delivered to the originator's own socket, so it is the
+	   recipient context when no peer target was supplied */
+	InstanceContextForSession *delivery_ctx_ptr = IS_PRESENT(ctx_ptr_target) ? ctx_ptr_target : ctx_ptr;
+
+	UFSRVResult *transmission_res_ptr = UfsrvCommandMarshalTransmissionStaged(delivery_ctx_ptr, &tmsg, 0);
+
+	/* body ownership is released by sCleanupWebSocketMessageBody() when this scope exits */
+	return transmission_res_ptr;
+
+}
+
+//8
+UFSRV_USER_COMMAND(uLOCATION_V1)
+{
+	/*//we are responding to a request
+	if (wsm_ptr->type == WEB_SOCKET_MESSAGE__TYPE__REQUEST) {
+		//assuming job is cleaned up before
+		if (JsonFormatUserLocation(ctx_ptr->sesn_ptr, jobj)) {//load jobj with current location description
+			char *json_str = (char *)json_object_to_json_string(jobj);//this str gets automatically deleted when jobj is 'put'
+			_COMMAND_RESPONSE("/v1/Location", 200, json_str)
+		} else {
+			syslog (LOG_DEBUG, "%s (cid: '%lu) ERROR COULD NOT LOAD LOACTION INTO JSON...", __func__, SESSION_ID(ctx_ptr->sesn_ptr));
+		}
+	} else { //if (wsm_ptr->type==WEB_SOCKET_MESSAGE__TYPE__RESPONSE)
+		//we are building a request
+	}
+
+	_RETURN_RESULT_SESN(ctx_ptr->sesn_ptr, NULL, RESULT_TYPE_ERR, RESCODE_PROG_NULL_POINTER)*/
+
+	//current semantics for Location involves responding to location for changes initiated (REQUEST) by clients
+  UfsrvCommandMarshallingDescriptor	*ufsrv_descpription_ptr	= (UfsrvCommandMarshallingDescriptor *)msgload;
+  TransmissionMessage					tmsg          = {0};
+  WebSocketMessage__Type			type;
+  _WEBSOCKET_MESSAGE_CLEANUP WebSocketMessage wsmsg = WEB_SOCKET_MESSAGE__INIT;
+  WebSocketResponseMessage    wsmsg_r,  *wsmsg_r_ptr  = &wsmsg_r;
+  WebSocketRequestMessage     wsmsg_rq, *wsmsg_rq_ptr = &wsmsg_rq;
+
+  wsmsg.command = "ufsrv://v1/Location"; //note no 'ufsrv://' prefix
+
+  tmsg.msg = (void *)&wsmsg;
+  tmsg.type = TRANSMSG_PROTOBUF;
+  tmsg.eid = ufsrv_descpription_ptr->eid;
+  tmsg.gid = ufsrv_descpription_ptr->gid;
+  tmsg.fid = ufsrv_descpription_ptr->fid;
+  tmsg.timestamp = ufsrv_descpription_ptr->timestamp;
+
+  if (IS_PRESENT(wsm_ptr_received))	type = wsm_ptr_received->type;
+  else					type = WEB_SOCKET_MESSAGE__TYPE__RESPONSE;
+
+  //The logic here is inverted. If original type was request, reply with 'response'
+  if (type == WEB_SOCKET_MESSAGE__TYPE__REQUEST) {
+    web_socket_response_message__init(wsmsg_r_ptr);
+
+    wsmsg.response = &wsmsg_r;
+    wsmsg.type = WEB_SOCKET_MESSAGE__TYPE__RESPONSE; wsmsg.has_type = 1;
+    wsmsg_r.id = wsm_ptr_received->request->id; wsmsg_r.has_id = 1;
+    wsmsg_r.status = 200; wsmsg_r.has_status = 1;
+
+    if (msgload) {
+      wsmsg_r.body.len = (*ufsrv_descpription_ptr->metadata->sizer)(ufsrv_descpription_ptr->payload);
+      wsmsg_r.body.data = calloc(1, wsmsg_r.body.len);
+      ufsrv_descpription_ptr->metadata->packer(ufsrv_descpription_ptr->payload, wsmsg_r.body.data);
+      wsmsg_r.has_body = 1;
+    }
+  } else if (type == WEB_SOCKET_MESSAGE__TYPE__RESPONSE) {
+    web_socket_request_message__init(wsmsg_rq_ptr);
+
+    wsmsg.request = &wsmsg_rq;
+    wsmsg.type = WEB_SOCKET_MESSAGE__TYPE__REQUEST; wsmsg.has_type = 1;
+
+    if (msgload) {
+      wsmsg_rq.body.len = (*ufsrv_descpription_ptr->metadata->sizer)(ufsrv_descpription_ptr->payload);
+      wsmsg_rq.body.data = calloc(1, wsmsg_rq.body.len);
+      ufsrv_descpription_ptr->metadata->packer(ufsrv_descpription_ptr->payload, wsmsg_rq.body.data);
+      wsmsg_rq.has_body = 1;
+    }
+  } else {
+    _RETURN_RESULT_SESN(AS_SESSION(ctx_ptr->sesn_ptr), NULL, RESULT_TYPE_ERR, RESCODE_PROG_NULL_POINTER)
+  }
+
+  if ((UfsrvCommandMarshalTransmission(ctx_ptr, ctx_ptr_target, &tmsg, 0)) >= 0) {
+    _RETURN_RESULT_SESN(AS_SESSION(ctx_ptr->sesn_ptr), NULL, RESULT_TYPE_SUCCESS, RESCODE_PROG_NULL_POINTER)
+  }
+
+  _RETURN_RESULT_SESN(AS_SESSION(ctx_ptr->sesn_ptr), NULL, RESULT_TYPE_ERR, RESCODE_PROG_NULL_POINTER)
+}
+
+/**
+ *	9
+ *
+ * 	Relays one fence command to a single recipient through the staged gateway: the caller supplies
+ * 	the recipient as @c ctx_ptr_target, and the fence command drain supplies the current connection
+ * 	of every target it resolves. A missing target falls back to the session that issued the
+ * 	command, which is how the originator's own acknowledgement is delivered.
+ *
+ * 	@dynamic_memory wsmsg_r.body.data: dynamically allocated to pack FenceCommand into; released by
+ * 	the @ref _WEBSOCKET_MESSAGE_CLEANUP releaser when the callback scope exits
+ */
+UFSRV_USER_COMMAND(uFENCE_V1)
+{
+	UfsrvCommandMarshallingDescriptor	*ufsrv_descpription_ptr	= (UfsrvCommandMarshallingDescriptor *)msgload;
+	TransmissionMessage					tmsg        = {0};
+	WebSocketMessage__Type			type;
+	_WEBSOCKET_MESSAGE_CLEANUP WebSocketMessage wsmsg = WEB_SOCKET_MESSAGE__INIT;
+  WebSocketResponseMessage    wsmsg_r;
+  WebSocketResponseMessage   *wsmsg_r_ptr = &wsmsg_r;
+  WebSocketRequestMessage     wsmsg_rq;
+  WebSocketRequestMessage    *wsmsg_rq_ptr = &wsmsg_rq;
+
+	wsmsg.command = "ufsrv://v1/Fence";
+
+	tmsg.msg = (void *)&wsmsg;
+	tmsg.type = TRANSMSG_PROTOBUF;
+	tmsg.eid = ufsrv_descpription_ptr->eid;
+  tmsg.gid = ufsrv_descpription_ptr->gid;
+	tmsg.fid = ufsrv_descpription_ptr->fid;
+	tmsg.timestamp = ufsrv_descpription_ptr->timestamp;
+
+	if (IS_PRESENT(wsm_ptr_received))	{
+	  type = wsm_ptr_received->type;
+	}
+	else	type = WEB_SOCKET_MESSAGE__TYPE__RESPONSE;
+
+	if (type == WEB_SOCKET_MESSAGE__TYPE__RESPONSE) {
+    web_socket_response_message__init(wsmsg_r_ptr);
+
+		wsmsg.response = &wsmsg_r;
+		wsmsg.type = WEB_SOCKET_MESSAGE__TYPE__RESPONSE; wsmsg.has_type = 1;
+
+		wsmsg_r.status = 200; wsmsg_r.has_status = 1;
+		/* a server-initiated push has no originating request, so there is no id to echo */
+    if (IS_PRESENT(wsm_ptr_received) && IS_PRESENT(wsm_ptr_received->request) && wsm_ptr_received->request->has_id) {
+      wsmsg_r.id = wsm_ptr_received->request->id;
+      wsmsg_r.has_id = 1;
+    }
+
+		if (msgload) {
+			wsmsg_r.body.len = (*ufsrv_descpription_ptr->metadata->sizer)(ufsrv_descpription_ptr->payload);
+			wsmsg_r.body.data = calloc(1, wsmsg_r.body.len);
+			ufsrv_descpription_ptr->metadata->packer(ufsrv_descpription_ptr->payload, wsmsg_r.body.data);
+			wsmsg_r.has_body = 1;
+		}
+	} else if (type == WEB_SOCKET_MESSAGE__TYPE__REQUEST) {
+    web_socket_request_message__init(wsmsg_rq_ptr);
+
+		wsmsg.request = &wsmsg_rq;
+		wsmsg.type = WEB_SOCKET_MESSAGE__TYPE__REQUEST; wsmsg.has_type = 1;
+
+		if (msgload) {
+			wsmsg_rq.body.len = (*ufsrv_descpription_ptr->metadata->sizer)(ufsrv_descpription_ptr->payload);
+			wsmsg_rq.body.data = calloc(1, wsmsg_rq.body.len);
+			ufsrv_descpription_ptr->metadata->packer(ufsrv_descpription_ptr->payload, wsmsg_rq.body.data);
+			wsmsg_rq.has_body = 1;
+		}
+	} else {
+		syslog (LOG_ERR, "%s {pid:'%lu', o:'%p', cid:'%lu', wsm_type:'%d'} ERROR: UNKNOWN WSM MESSAGE TYPE...", __func__, pthread_self(), ctx_ptr->sesn_ptr, SESSION_ID(AS_SESSION(ctx_ptr->sesn_ptr)), type);
+		_RETURN_RESULT_SESN(AS_SESSION(ctx_ptr->sesn_ptr), NULL, RESULT_TYPE_ERR, RESCODE_PROG_NULL_POINTER)
+	}
+
+	/* the reply to the originator is delivered to its own socket, so it is the recipient context
+	   when no peer target was supplied; the staged drain always supplies one */
+	InstanceContextForSession *delivery_ctx_ptr = IS_PRESENT(ctx_ptr_target) ? ctx_ptr_target : ctx_ptr;
+
+	/* body ownership is released by sCleanupWebSocketMessageBody() when this scope exits */
+	return UfsrvCommandMarshalTransmissionStaged(delivery_ctx_ptr, &tmsg, 0);
+
+}
+
+//10
+UFSRV_USER_COMMAND(uSTATESYNC_V1)
+{
+	if (IS_PRESENT(JsonFormatStateSync(AS_SESSION(ctx_ptr->sesn_ptr), DIGESTMODE_BRIEF, false, jobj))) {
+		char *json_str = (char *)json_object_to_json_string(jobj);//this str gets automatically deleted when jobj is 'put' in the calling function
+
+		//client can request this anytime to sync its own state
+		if (wsm_ptr_received && wsm_ptr_received->type == WEB_SOCKET_MESSAGE__TYPE__REQUEST) {
+			_COMMAND_RESPONSE("/v1/StateSync", 200, json_str)
+		} else {//could be null wsm, we build our own
+			_COMMAND_REQUEST("/v1/StateSync", 0, json_str)
+		}
+	}
+
+	_RETURN_RESULT_SESN(AS_SESSION(ctx_ptr->sesn_ptr), NULL, RESULT_TYPE_ERR, RESCODE_PROG_NULL_POINTER)
+}

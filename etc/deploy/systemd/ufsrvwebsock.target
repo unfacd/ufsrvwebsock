@@ -1,0 +1,17 @@
+# systemd target grouping the ufsrvwebsock instances into one fleet handle.
+#
+# The fleet is defined by what you ENABLE, not by a hard-coded list here: each
+# ufsrvwebsock@.service declares 'WantedBy=ufsrvwebsock.target', so
+# 'systemctl enable ufsrvwebsock@0' drops a symlink into
+# ufsrvwebsock.target.wants/ and this target starts every enabled instance.
+#
+#   systemctl enable ufsrvwebsock@0 ufsrvwebsock@1   # pick fleet members
+#   systemctl enable --now ufsrvwebsock.target       # start now + auto-start at boot
+#   systemctl start   ufsrvwebsock.target            # start the fleet
+#   systemctl stop    ufsrvwebsock.target            # stop the fleet (needs PartOf= in each instance)
+
+[Unit]
+Description=ufsrvwebsock fleet
+
+[Install]
+WantedBy=multi-user.target

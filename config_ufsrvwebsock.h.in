@@ -1,0 +1,45 @@
+/**
+ * Copyright (C) 2015-2026 unfacd works
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU Affero General Public License for more details.
+ *
+ * You should have received a copy of the GNU Affero General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ */
+
+/**
+ * @file config.h.in
+ * @brief CMake configure_file() template -- generates config.h at configure time.
+ * #Configuration defaults for items which the user did not pass value for via -D are in cmake-modules/config_defaults_definitions.cmake
+ */
+
+#ifndef CONFIG_UFSRVWEBSOCK_H
+#define CONFIG_UFSRVWEBSOCK_H
+
+#define _REENTRANT
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+
+// standard HAVE_* probes (preferred over old __VALGRIND_DRD)
+#cmakedefine HAVE_VALGRIND
+#cmakedefine HAVE_VALGRIND_DRD
+#cmakedefine HAVE_VALGRIND_MEMCHECK
+
+#define CONFIG_UFSRVWEBSOCK_CONFIGFILE_ADJUNCT_SCHEMA "@CONFIG_UFSRVWEBSOCK_CONFIGFILE_ADJUNCT_SCHEMA@"
+#define CONFIG_CONFIGFILE_DEFAULT_PID_DIR "@CONFIG_CONFIGFILE_DEFAULT_PID_DIR@"
+
+/* 1 when CMAKE_BUILD_TYPE=Debug: gates diagnostic records that stay in the tree. */
+#define UFSRVWEBSOCK_DEBUG_BUILD @UFSRVWEBSOCK_DEBUG_BUILD@   /* 1 for Debug builds, or when a verbosity level is on */
+#define UFSRVWEBSOCK_DEBUG_BUILD_L2 @UFSRVWEBSOCK_DEBUG_L2@  /* level-2 verbose tracing */
+#define UFSRVWEBSOCK_DEBUG_BUILD_L3 @UFSRVWEBSOCK_DEBUG_L3@  /* level-3 per-object tracing */
+
+#endif /* CONFIG_UFSRVWEBSOCK_H */

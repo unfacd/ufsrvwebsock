@@ -1,0 +1,107 @@
+/**
+ * @file ufsrv_config_generator_fields.c.input
+ * @brief Cold catalogue — ufsrvwebsock leaf-server adjunct config fields.
+ *
+ * Mirror of ufsrvcorelib/etc/adjunct_schema_ufsrvwebsock.lua
+ * (ufsrvwebsock.websocket scope).  Field names, defaults and lower bounds must
+ * stay aligned with that schema and with the CONF_FILE_LITERAL_UFSRVWEBSOCK_*
+ * macros in ufsrv_config_literals_defs.h.
+ *
+ * Copyright (C) 2015-2026 unfacd works
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ */
+
+//These help the generator compile
+#include <limits.h>
+#include <netinet/in.h>
+#include <lua.h>
+
+#include <ufsrvcorelib/ufsrv_core/ufsrv_config/ufsrv_config_field_descriptor.h>
+#include <ufsrvcorelib/ufsrv_core/ufsrv_config/ufsrv_config_store_operating_state_enum.h>
+
+static const UfsrvConfigFieldDescriptorForGenerator core_fields[] = {
+
+    // ── WebSocket protocol (schema: min is inclusive; no upper bound) ────────
+    {
+        .name            = "websocket_max_frame_size",
+        .value_type      = UFSRV_CONFIG_VALUE_INT,
+        .config_file_key = CONF_FILE_LITERAL_UFSRVWEBSOCK_WEBSOCKET_MAX_FRAME_SIZE,
+        .c_lang_type     = "int",
+        .domain          = UFSRV_CONFIG_DOMAIN_CONFIG,
+        .config_field_default    = { .config = { .stored_value = { .int_val = 65536 } } },
+        .lifecycle = { .on_inflated = "GenericIntInflator", .on_value_available = "GenericIntSetter", .on_value_reloaded = "GenericReloadedStub", .on_teardown = NULL },
+        .validation      = { .type = UFSRV_CONFIG_CHECK_RANGE, .check = { .range = {256, INT_MAX} } },
+    },
+    {
+        .name            = "websocket_max_message_size",
+        .value_type      = UFSRV_CONFIG_VALUE_INT,
+        .config_file_key = CONF_FILE_LITERAL_UFSRVWEBSOCK_WEBSOCKET_MAX_MESSAGE_SIZE,
+        .c_lang_type     = "int",
+        .domain          = UFSRV_CONFIG_DOMAIN_CONFIG,
+        .config_field_default    = { .config = { .stored_value = { .int_val = 1048576 } } },
+        .lifecycle = { .on_inflated = "GenericIntInflator", .on_value_available = "GenericIntSetter", .on_value_reloaded = "GenericReloadedStub", .on_teardown = NULL },
+        .validation      = { .type = UFSRV_CONFIG_CHECK_RANGE, .check = { .range = {256, INT_MAX} } },
+    },
+    {
+        .name            = "websocket_heartbeat_interval_secs",
+        .value_type      = UFSRV_CONFIG_VALUE_INT,
+        .config_file_key = CONF_FILE_LITERAL_UFSRVWEBSOCK_WEBSOCKET_HEARTBEAT_INTERVAL_SECS,
+        .c_lang_type     = "int",
+        .domain          = UFSRV_CONFIG_DOMAIN_CONFIG,
+        .config_field_default    = { .config = { .stored_value = { .int_val = 30 } } },
+        .lifecycle = { .on_inflated = "GenericIntInflator", .on_value_available = "GenericIntSetter", .on_value_reloaded = "GenericReloadedStub", .on_teardown = NULL },
+        .validation      = { .type = UFSRV_CONFIG_CHECK_RANGE, .check = { .range = {5, INT_MAX} } },
+    },
+    {
+        .name            = "websocket_close_timeout_secs",
+        .value_type      = UFSRV_CONFIG_VALUE_INT,
+        .config_file_key = CONF_FILE_LITERAL_UFSRVWEBSOCK_WEBSOCKET_CLOSE_TIMEOUT_SECS,
+        .c_lang_type     = "int",
+        .domain          = UFSRV_CONFIG_DOMAIN_CONFIG,
+        .config_field_default    = { .config = { .stored_value = { .int_val = 10 } } },
+        .lifecycle = { .on_inflated = "GenericIntInflator", .on_value_available = "GenericIntSetter", .on_value_reloaded = "GenericReloadedStub", .on_teardown = NULL },
+        .validation      = { .type = UFSRV_CONFIG_CHECK_RANGE, .check = { .range = {1, INT_MAX} } },
+    },
+    {
+        .name            = "websocket_max_connections_per_session",
+        .value_type      = UFSRV_CONFIG_VALUE_INT,
+        .config_file_key = CONF_FILE_LITERAL_UFSRVWEBSOCK_WEBSOCKET_MAX_CONNECTIONS_PER_SESSION,
+        .c_lang_type     = "int",
+        .domain          = UFSRV_CONFIG_DOMAIN_CONFIG,
+        .config_field_default    = { .config = { .stored_value = { .int_val = 1 } } },
+        .lifecycle = { .on_inflated = "GenericIntInflator", .on_value_available = "GenericIntSetter", .on_value_reloaded = "GenericReloadedStub", .on_teardown = NULL },
+        .validation      = { .type = UFSRV_CONFIG_CHECK_RANGE, .check = { .range = {1, INT_MAX} } },
+    },
+
+    {
+        .name            = "cloud_service_accounts_gpc_firebase_messaging",
+        .value_type      = UFSRV_CONFIG_VALUE_STR,
+        .config_file_key = CONF_FILE_LITERAL_CLOUD_SERVICE_ACCOUNTS_GPC_FIREBASE_MESSAGING,
+        .c_lang_type     = "char *",
+        .domain          = UFSRV_CONFIG_DOMAIN_CONFIG,
+        .config_field_default    = { .config = { .stored_value = { .str_val = "" }, .type_allocation_sz = 8192 } }, //enc:v1 envelope of the service-account document
+        .lifecycle = { .on_inflated = "GenericStrInflator", .on_value_available = "GenericStrSetter", .on_value_reloaded = "GenericReloadedStub", .on_teardown = "GenericStrTeardown" },
+        .validation      = { .type = UFSRV_CONFIG_CHECK_NONE },
+    },
+    {
+        .name            = "cloud_service_accounts_gpc_integrity",
+        .value_type      = UFSRV_CONFIG_VALUE_STR,
+        .config_file_key = CONF_FILE_LITERAL_CLOUD_SERVICE_ACCOUNTS_GPC_INTEGRITY,
+        .c_lang_type     = "char *",
+        .domain          = UFSRV_CONFIG_DOMAIN_CONFIG,
+        .config_field_default    = { .config = { .stored_value = { .str_val = "" }, .type_allocation_sz = 8192 } }, //enc:v1 envelope of the service-account document
+        .lifecycle = { .on_inflated = "GenericStrInflator", .on_value_available = "GenericStrSetter", .on_value_reloaded = "GenericReloadedStub", .on_teardown = "GenericStrTeardown" },
+        .validation      = { .type = UFSRV_CONFIG_CHECK_NONE },
+    },
+
+    // Sentinel — do not remove
+    { .name = NULL }
+};
+
+static const size_t core_field_count =
+    (sizeof(core_fields) / sizeof(core_fields[0])) - 1;

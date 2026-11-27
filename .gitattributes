@@ -1,0 +1,12 @@
+# Pin the mirror control files to LF regardless of core.autocrlf.
+# CRLF here silently defeats the exclusion parsing and leaks private files
+# into the public GitHub mirror (see devops/post_squash_hook.sh).
+devops/git_mirror_exclusions.txt                text eol=lf
+devops/git_last_mirror_commit_ids_registry.txt  text eol=lf
+devops/*.sh                                      text eol=lf
+
+# Ensure cross-platform scripts use LF regardless of core.autocrlf.
+# Prevents CRLF-related build failures in subtree packages.
+*.sh      text eol=lf
+*.cmake   text eol=lf
+*.py      text eol=lf

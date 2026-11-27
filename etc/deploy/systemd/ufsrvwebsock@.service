@@ -1,0 +1,51 @@
+# systemd *template* unit for multi-instance ufsrvwebsock.
+#
+# Instantiate it with a numeric id after the '@'; %i expands to that id and is
+# passed straight through to the server's -i / --instance-id option.
+#
+#   systemctl start   ufsrvwebsock@0
+#   systemctl start   ufsrvwebsock@1
+#   systemctl enable  ufsrvwebsock@0 ufsrvwebsock@1   # start at boot
+#
+# Each ufsrvwebsock@N is a distinct unit: its own cgroup, main PID, journal
+# identity (SyslogIdentifier) and runtime dir. See
+# UFSRV_SERVER_PROCESS_ARCHITECTURE.md §9.
+
+[Unit]
+Description=ufsrvwebsock service (instance %i)
+After=network.target
+
+# For "one handle for the whole fleet", aggregate instances under a
+# ufsrvwebsock.target and opt in to stop propagation here — PartOf= makes
+# 'systemctl stop ufsrvwebsock.target' stop this instance too (see §9.2).
+# PartOf=ufsrvwebsock.target
+
+[Service]
+LoadCredential=ufsrv_secret_key:/opt/ufsrv/ufsrvwebsock/etc/secrets/ufsrv_secret_key
+User=ufsrv
+Group=ufsrv
+Type=notify
+NotifyAccess=all
+WorkingDirectory=/opt/ufsrv/ufsrvwebsock/etc
+
+# %i → the numeric instance id (the -i value).
+ExecStart=/opt/ufsrv/ufsrvwebsock/bin/ufsrvwebsock -C /opt/ufsrv/ufsrvwebsock -c ufsrvwebsock.config.lua -i %i
+# If instances use per-instance config files, template -c too:
+# ExecStart=/opt/ufsrv/ufsrvwebsock/bin/ufsrvwebsock -C /opt/ufsrv/ufsrvwebsock -c ufsrvwebsock-%i.config.lua -i %i
+
+SyslogIdentifier=ufsrvwebsock-%i
+RuntimeDirectory=ufsrvwebsock-%i
+
+# With Type=notify a pidfile is optional (systemd learns the PID from the notify
+# socket). If you instead use Type=forking + a per-instance pidfile, the pidfile
+# path must be keyed on the instance id too — see the architecture doc §9.3.
+# PIDFile=/run/ufsrvwebsock-%i/ufsrvwebsock-%i.pid
+
+LimitCORE=infinity
+SuccessExitStatus=143 0
+
+[Install]
+# Fleet membership: 'systemctl enable ufsrvwebsock@N' symlinks this instance
+# into ufsrvwebsock.target.wants/, so 'systemctl start ufsrvwebsock.target'
+# brings it up. Enable the target itself to auto-start the fleet at boot.
+WantedBy=ufsrvwebsock.target
